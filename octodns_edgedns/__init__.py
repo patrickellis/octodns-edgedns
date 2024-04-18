@@ -1,7 +1,6 @@
 #
 #
 #
-
 from collections import defaultdict
 from logging import getLogger
 from urllib.parse import urljoin
@@ -15,7 +14,7 @@ from octodns.provider.base import BaseProvider
 from octodns.record import Record
 
 # TODO: remove __VERSION__ with the next major version release
-__version__ = __VERSION__ = '0.0.3'
+__version__ = __VERSION__ = '0.0.4'
 
 
 class AkamaiClientNotFound(ProviderException):
@@ -36,7 +35,9 @@ class AkamaiClient(object):
 
     '''
 
-    def __init__(self, client_secret, host, access_token, client_token):
+    def __init__(
+        self, client_secret, host, access_token, client_token, comment
+    ):
         self.base = "https://" + host + "/config-dns/v2/"
 
         sess = Session()
@@ -51,6 +52,7 @@ class AkamaiClient(object):
             access_token=access_token,
         )
         self._sess = sess
+        self.comment = comment
 
     def _request(self, method, path, params=None, data=None, v1=False):
         url = urljoin(self.base, path)
@@ -109,7 +111,9 @@ class AkamaiClient(object):
     def zone_changelist_submit(self, zone):
         path = f'changelists/{zone}/submit'
 
-        result = self._request('POST', path, data={})
+        result = self._request(
+            'POST', path, data={}, params={"comment": self.comment}
+        )
 
         return result
 
@@ -169,6 +173,7 @@ class AkamaiProvider(BaseProvider):
         client_token,
         contract_id=None,
         gid=None,
+        comment=None,
         *args,
         **kwargs,
     ):
@@ -177,7 +182,7 @@ class AkamaiProvider(BaseProvider):
         super().__init__(id, *args, **kwargs)
 
         self._dns_client = AkamaiClient(
-            client_secret, host, access_token, client_token
+            client_secret, host, access_token, client_token, comment
         )
 
         self._zone_records = {}
