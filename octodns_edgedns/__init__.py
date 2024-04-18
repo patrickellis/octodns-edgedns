@@ -88,23 +88,25 @@ class AkamaiClient(object):
 
         return result
 
-    def zone_create(self, contractId, params, gid=None):
-        path = f'zones?contractId={contractId}'
+    def zone_create(self, contractId, data, gid=None):
+        path = 'zones'
+        params = {"contractId": contractId}
 
         if gid is not None:
-            path += f'&gid={gid}'
+            params["gid"] = gid
 
-        result = self._request('POST', path, data=params)
+        result = self._request('POST', path, data=data, params=params)
 
         return result
 
     def zone_changelist_create(self, zone, overwrite=False):
-        path = f'changelists?zone={zone}'
+        path = 'changelists'
+        params = {"zone": zone}
 
         if overwrite:
-            path += '&overwrite=stale'
+            params["overwrite"] = "stale"
 
-        result = self._request('POST', path, data={})
+        result = self._request('POST', path, data={}, params=params)
 
         return result
 
@@ -221,6 +223,11 @@ class AkamaiProvider(BaseProvider):
 
         before = len(zone.records)
         for name, types in values.items():
+            if "#" in name:
+                self.log.warning(
+                    f"Skipping record with invalid name: {name} in zone {zone.name}"
+                )
+                continue
             for _type, records in types.items():
                 data_for = getattr(self, f'_data_for_{_type}')
                 record = Record.new(
@@ -248,18 +255,16 @@ class AkamaiProvider(BaseProvider):
             self._dns_client.zone_get(zone_name)
 
         except AkamaiClientNotFound:
-            self.log.info("zone not found, creating zone")
-            params = self._build_zone_config(zone_name)
-            self._dns_client.zone_create(self._contractId, params, self._gid)
-            self.log.info(
-                "zone created, generating SOA and NS records (required)."
-            )
+            self.log.info("DNS Zone not found, creating...")
+            data = self._build_zone_config(zone_name)
+            self._dns_client.zone_create(self._contractId, data, self._gid)
+            self.log.info("Generating SOA and NS records...")
             self._dns_client.zone_changelist_create(zone_name, True)
             self._dns_client.zone_changelist_submit(zone_name)
 
-            for change in changes:
-                class_name = change.__class__.__name__
-                getattr(self, f'_apply_{class_name}')(change)
+        for change in changes:
+            class_name = change.__class__.__name__
+            getattr(self, f'_apply_{class_name}')(change)
 
         # Clear out the cache if any
         self._zone_records.pop(desired.name, None)
