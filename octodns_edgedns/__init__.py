@@ -12,9 +12,13 @@ from octodns import __VERSION__ as octodns_version
 from octodns.provider import ProviderException
 from octodns.provider.base import BaseProvider
 from octodns.record import Record
+import json
 
 # TODO: remove __VERSION__ with the next major version release
 __version__ = __VERSION__ = '0.0.4'
+
+
+log_internal = getLogger("debugging")
 
 
 class AkamaiClientNotFound(ProviderException):
@@ -43,7 +47,6 @@ class AkamaiClient(object):
         sess = Session()
         sess.headers.update(
             {
-                'User-Agent': f'octodns/{octodns_version} octodns-edgedns/{__VERSION__}'
             }
         )
         sess.auth = EdgeGridAuth(
@@ -56,10 +59,13 @@ class AkamaiClient(object):
 
     def _request(self, method, path, params=None, data=None, v1=False):
         url = urljoin(self.base, path)
-        resp = self._sess.request(method, url, params=params, json=data)
+        resp = self._sess.request(method, url, json=data, headers={}, params=params)
+        log_internal.info(f"Request: {url}. Method: {method}.")
+        log_internal.info(f"Response: {json.dumps(resp.text[:999999], indent=2)}...")
 
         if resp.status_code == 404:
             raise AkamaiClientNotFound(resp)
+
         resp.raise_for_status()
 
         return resp
@@ -88,13 +94,25 @@ class AkamaiClient(object):
 
         return result
 
+    def zones_get(self):
+        path = f'zones'
+        result = self._request('GET', path, params={"showAll":True})
+
+        return result
+
     def zone_create(self, contractId, params, gid=None):
         path = f'zones?contractId={contractId}'
 
         if gid is not None:
             path += f'&gid={gid}'
 
+        import json
+        params["comment"] = self.comment
+
+        log_internal.info(f"Path: {path}")
+        log_internal.info(json.dumps(params, indent=2))
         result = self._request('POST', path, data=params)
+        print(json.dumps(result.json(), indent=2))
 
         return result
 
@@ -147,6 +165,7 @@ class AkamaiProvider(BaseProvider):
     SUPPORTS_GEO = False
     SUPPORTS_DYNAMIC = False
     SUPPORTS_MULTIVALUE_PTR = True
+#    SUPPORTS_ROOT_NS = True
 
     SUPPORTS = set(
         (
@@ -175,11 +194,13 @@ class AkamaiProvider(BaseProvider):
         contract_id=None,
         gid=None,
         comment=None,
+        supports_root_ns=False,
         *args,
         **kwargs,
     ):
         self.log = getLogger(f'AkamaiProvider[{id}]')
         self.log.debug('__init__: id=%s, ')
+        self.SUPPORTS_ROOT_NS = supports_root_ns
         super().__init__(id, *args, **kwargs)
 
         self._dns_client = AkamaiClient(
@@ -205,9 +226,15 @@ class AkamaiProvider(BaseProvider):
 
         return self._zone_records[zone.name]
 
+    def list_zones(self):
+        """Returns a list of zones."""
+        zones = self._dns_client.zones_get()
+        res = [zone["zone"]+"." for zone in zones.json()["zones"]]
+        return res
+
     def populate(self, zone, target=False, lenient=False):
         self.log.debug('populate: name=%s', zone.name)
-
+        print(self.SUPPORTS_ROOT_NS)
         values = defaultdict(lambda: defaultdict(list))
         for record in self.zone_records(zone):
             _type = record.get('type')
@@ -247,7 +274,6 @@ class AkamaiProvider(BaseProvider):
         zone_name = desired.name[:-1]
         try:
             self._dns_client.zone_get(zone_name)
-
         except AkamaiClientNotFound:
             self.log.info("zone not found, creating zone")
             params = self._build_zone_config(zone_name)
@@ -266,6 +292,7 @@ class AkamaiProvider(BaseProvider):
         self._zone_records.pop(desired.name, None)
 
     def _apply_Create(self, change):
+        self.log.info(f"Creating record {change.new.name}")
         new = change.new
         record_type = new._type
 
