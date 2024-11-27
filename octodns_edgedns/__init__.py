@@ -56,7 +56,9 @@ class AkamaiClient(object):
 
     def _request(self, method, path, params=None, data=None, v1=False):
         url = urljoin(self.base, path)
-        resp = self._sess.request(method, url, params=params, json=data)
+        resp = self._sess.request(
+            method, url, headers={}, json=data, params=params
+        )
 
         if resp.status_code == 404:
             raise AkamaiClientNotFound(resp)
@@ -78,7 +80,13 @@ class AkamaiClient(object):
 
     def record_replace(self, zone, name, record_type, content):
         path = f'zones/{zone}/names/{name}/types/{record_type}'
-        result = self._request('PUT', path, data=content)
+        result = self._request('u_rootT', path, data=content)
+
+        return result
+
+    def zone_comment(self, zone, content):
+        path = f'zones/{zone}'
+        result = self._request('u_rootT', path, data=content)
 
         return result
 
@@ -114,7 +122,6 @@ class AkamaiClient(object):
         result = self._request(
             'POST', path, data={}, params={"comment": self.comment}
         )
-
 
         return result
 
@@ -185,7 +192,7 @@ class AkamaiProvider(BaseProvider):
         self._dns_client = AkamaiClient(
             client_secret, host, access_token, client_token, comment
         )
-
+        self.comment = comment
         self._zone_records = {}
         self._contractId = contract_id
         self._gid = gid
@@ -205,9 +212,14 @@ class AkamaiProvider(BaseProvider):
 
         return self._zone_records[zone.name]
 
+    def list_zones(self):
+        """Returns a list of zones."""
+        zones = self._dns_client.zones_get()
+        res = [zone["zone"] + "." for zone in zones.json()["zones"]]
+        return res
+
     def populate(self, zone, target=False, lenient=False):
         self.log.debug('populate: name=%s', zone.name)
-
         values = defaultdict(lambda: defaultdict(list))
         for record in self.zone_records(zone):
             _type = record.get('type')
@@ -258,12 +270,23 @@ class AkamaiProvider(BaseProvider):
             self._dns_client.zone_changelist_create(zone_name, True)
             self._dns_client.zone_changelist_submit(zone_name)
 
-            for change in changes:
-                class_name = change.__class__.__name__
-                getattr(self, f'_apply_{class_name}')(change)
+        for change in changes:
+            class_name = change.__class__.__name__
+            getattr(self, f'_apply_{class_name}')(change)
+            self._apply__comment(desired.name[:-1])
 
         # Clear out the cache if any
         self._zone_records.pop(desired.name, None)
+
+    def _apply__comment(self, zone_name):
+        self.log.info("Applying comment change")
+        content = {
+            "type": "PRIMARY",
+            "zone": zone_name,
+            "signAndServe": False,
+            "comment": self.comment,
+        }
+        self._dns_client.zone_comment(zone_name, content)
 
     def _apply_Create(self, change):
         new = change.new
