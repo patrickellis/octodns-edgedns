@@ -1,12 +1,11 @@
-#
-#
-#
+import logging
+import time
 from collections import defaultdict
 from logging import getLogger
 from urllib.parse import urljoin
 
 from akamai.edgegrid import EdgeGridAuth
-from requests import Session
+from requests import ConnectionError, HTTPError, Session, Timeout
 
 from octodns import __VERSION__ as octodns_version
 from octodns.provider import ProviderException
@@ -15,6 +14,9 @@ from octodns.record import Record
 
 # TODO: remove __VERSION__ with the next major version release
 __version__ = __VERSION__ = '0.0.4'
+
+logger = getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 
 class AkamaiClientNotFound(ProviderException):
@@ -26,17 +28,21 @@ class AkamaiClientNotFound(ProviderException):
 class AkamaiClient(object):
     '''
     Client for making calls to Akamai Fast DNS API using Python Requests
+    with retries, exponential backoff, and sensible defaults.
 
     Edge DNS Zone Management API V2, found here:
     https://developer.akamai.com/api/cloud_security/edge_dns_zone_management/v2.html
-
-    Info on Python Requests library:
-    https://2.python-requests.org/en/master/
-
     '''
 
     def __init__(
-        self, client_secret, host, access_token, client_token, comment
+        self,
+        client_secret,
+        host,
+        access_token,
+        client_token,
+        comment,
+        max_retries=5,
+        backoff_factor=1.0,
     ):
         self.base = "https://" + host + "/config-dns/v2/"
 
@@ -53,16 +59,81 @@ class AkamaiClient(object):
         )
         self._sess = sess
         self.comment = comment
+        self.max_retries = max_retries
+        self.backoff_factor = backoff_factor
 
-    def _request(self, method, path, params=None, data=None, v1=False):
+    def _make_request(self, method, url, **kwargs):
+        """
+        Helper method that executes HTTP requests with retries and exponential backoff.
+        Retries on common transient errors (connection errors, timeouts, and rate limits).
+
+        Note 1: No f-strings in logging statements. https://bugs.python.org/issue46200.
+        Note 2: No jitter. Rate limiting isn't that bad.
+        """
+        attempt = 0
+        while True:
+            try:
+                logger.debug(
+                    "Making request: %s %s (attempt %d)",
+                    method,
+                    url,
+                    attempt + 1,
+                )
+                resp = self._sess.request(method, url, **kwargs)
+
+                if resp.status_code in (429, 500, 502, 503, 504):
+                    logger.warning(
+                        "Received status %d, retrying...", resp.status_code
+                    )
+                    if attempt >= self.max_retries:
+                        logger.error("Max retries reached. Giving up.")
+                        resp.raise_for_status()
+                    else:
+                        backoff_time = self.backoff_factor * (2**attempt)
+                        logger.debug(
+                            "Sleeping for %.2f seconds before retry",
+                            backoff_time,
+                        )
+                        time.sleep(backoff_time)
+                        attempt += 1
+                        continue
+
+                resp.raise_for_status()
+                return resp
+
+            except (ConnectionError, Timeout) as e:
+                logger.warning(
+                    "Flaky network error (%s) encountered, retrying...", str(e)
+                )
+                if attempt >= self.max_retries:
+                    logger.error(
+                        "Max retries reached. Unable to complete request."
+                    )
+                    raise
+                backoff_time = self.backoff_factor * (2**attempt)
+                logger.debug(
+                    "Sleeping for %.2f seconds before retry", backoff_time
+                )
+                time.sleep(backoff_time)
+                attempt += 1
+            except HTTPError as http_err:
+                if (
+                    400 <= http_err.response.status_code < 500
+                    and http_err.response.status_code != 429
+                ):
+                    logger.error("Non-retryable HTTPError: %s", http_err)
+                    raise
+                else:
+                    raise
+
+    def _request(self, method, path, params=None, data=None):
         url = urljoin(self.base, path)
-        resp = self._sess.request(
+        resp = self._make_request(
             method, url, headers={}, json=data, params=params
         )
 
         if resp.status_code == 404:
             raise AkamaiClientNotFound(resp)
-        resp.raise_for_status()
 
         return resp
 
