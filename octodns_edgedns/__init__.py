@@ -122,9 +122,7 @@ class AkamaiClient(object):
                     and http_err.response.status_code != 429
                 ):
                     logger.error("Non-retryable HTTPError: %s", http_err)
-                    raise
-                else:
-                    raise
+                raise
 
     def _request(self, method, path, params=None, data=None):
         url = urljoin(self.base, path)
